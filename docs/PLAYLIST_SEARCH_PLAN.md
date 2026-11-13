@@ -8,16 +8,22 @@ Jellyfin / folder playlists alike.
 
 ## 1. Goal
 
-When a playlist has hundreds of songs, finding one means scrolling. Add a search field on the
-playlist screen that filters the visible songs as the user types, without leaving the screen,
-without losing the playlist's own order, and without a second data source.
+When a playlist has 2000 songs, finding one means scrolling through 2000 rows. Add a search
+field on the playlist screen that narrows the visible rows as the user types, so a song can be
+located in seconds.
+
+**Search is a locator, not a mode.** It changes what is *shown*, never what *plays*: Play,
+Shuffle and tapping a result all keep using the full playlist (§6). That keeps the feature tiny
+and removes every playback edge case.
 
 Non-goals:
 
 - No change to the global `SearchScreen` (bottom-nav tab) or its history/filters.
 - No new playlist-name search in the Library playlists tab (`searchPlaylists` already backs
   the add-to-playlist sheet).
-- No fuzzy/relevance ranking, no lyrics search, no saved query.
+- No change to playback, queue or play-count semantics.
+- No fuzzy/relevance ranking, no lyrics search, no saved query, no persistence across
+  navigation.
 
 ---
 
@@ -141,7 +147,8 @@ object PlaylistSongSearch {
     fun filter(songs: List<Song>, query: String): List<Song> =
         if (query.isBlank()) songs else songs.filter { matches(it, query) }
 
-    /** Path is included so a user can find a song by its file name, as the picker does. */
+    /** Metadata a user actually indexes by. The file path is deliberately left out: it adds
+     *  noise (remote ids for cloud songs) without helping anyone find a track by name. */
     private fun Song.searchableFields(): List<String> = buildList {
         add(NlpText.normalize(title))
         add(NlpText.normalize(artist))
@@ -150,7 +157,6 @@ object PlaylistSongSearch {
         add(NlpText.normalize(album))
         add(NlpText.normalize(albumArtist.orEmpty()))
         add(NlpText.normalize(genre.orEmpty()))
-        add(NlpText.normalize(path.substringAfterLast('/')))
     }
 }
 ```
@@ -165,6 +171,8 @@ Rules, explicitly:
   in-app filters; no fuzzy matching, no typo tolerance.
 - Playlist order is preserved — no relevance ranking — and duplicate occurrences of the same
   song stay separate rows.
+- Metadata only: title, artist, `displayArtist`, every `artists[]` entry, album, album artist,
+  genre. File name / path is **not** matched.
 - `NlpText` is reused rather than copied (`data/playlist/nlp/NlpText.kt:30`), but **not** its
   stemmer: stemming is right for mood queries and wrong for title search.
 
@@ -178,17 +186,22 @@ Rules, explicitly:
 | Back gesture | Same as above (`BackHandler`) | Expected on a focused field |
 | Reorder mode | Disabled and force-off when search opens; drag handles hidden while filtering | `ReorderableItem(key = entry.index)` and `reorderSongsInPlaylist(from, to)` address **display positions**; a filtered list would persist the wrong permutation |
 | Remove mode | Allowed; removal still uses song ids | `removeSongFromPlaylist(playlistId, song.id)` (`:875`) is id-based, so it stays correct |
-| Play | Plays the **filtered** list, first visible row as start song, same `queueName` + `playlistId` | "Play what I see"; keeps playlist tagging, transitions and last-playlist tile working |
-| Shuffle | Shuffles the filtered list | Same reasoning |
+| Play | **Unchanged** — always plays the whole playlist, filtered or not | Search is a locator; play state must not depend on what is on screen |
+| Shuffle | **Unchanged** — shuffles the whole playlist | Same reasoning |
+| Tapping a result row | **Unchanged** — plays the whole playlist starting at that song, so playback continues past the matches | The tapped song is guaranteed to be a member of the full list, so the existing call needs no change |
 | Sort | Allowed; sorts the underlying playlist, list re-derives, scrolls to top | Filter and sort are orthogonal |
 | Add songs / playlist options | Unaffected (chip row hidden, app-bar overflow still available) | No coupling |
 | Song info sheet → remove from list | Removes by id; if it was the only match the empty-filter state appears | Consistent |
 | Cloud download of playlist | `CloudOfflineRepository.downloadCandidates(songsInPlaylist)` keeps using the **full** list | Downloading should not silently narrow to matches |
 | Leaving the screen | Query dropped | No hidden filter on return |
 
-Playback of a filtered list is stored as a queue snapshot with `playlistId` set to the playlist,
-so restoring that queue later restores the filtered subset, not the whole playlist. That is the
-intended reading of "last played from this playlist" and needs no code change.
+Playback consequence: none. The queue snapshot, play counts, transitions and the last-playlist
+tile all keep seeing the full playlist, because every playback call keeps receiving
+`localReorderableSongs` (`:432`, `:474`, `:809`). Those three call sites must **not** be touched
+by this feature — that is the check that the locator semantics stayed intact in review.
+
+Also: Play/Shuffle stay enabled while a query is active, even with zero matches. Disabling them
+would imply playback follows the filter, which it does not.
 
 ---
 
@@ -236,13 +249,14 @@ Then:
    `OutlinedTextField` extracted from `SongPickerSearchField` (`SongPickerBottomSheet.kt:435`),
    parameterized by value / onValueChange / hint / modifier. Reused by the playlist screen now;
    the two existing call sites can adopt it later without behaviour change.
-3. **`PlaylistDetailScreen.kt`** (~80 changed lines):
+3. **`PlaylistDetailScreen.kt`** (~70 changed lines, all additive):
    - search `IconButton` in `actions` before sort (`:369`);
    - `BackHandler` + focus/IME handling + `InlineSearchField` row between `Column {` (`:383`) and
      the Play/Shuffle row;
    - hide the chip row while `isSearchOpen`, force off remove/reorder modes;
    - `filteredSongs` / `displayedEntries`; swap the `items(...)` source and its `key` (`:775`);
-   - play/shuffle use the filtered list (`:432`, `:474`) — keep `currentPlaylist.id`;
+   - **no change** to the play/shuffle/row-tap call sites (`:432`, `:474`, `:809`) — they keep
+     receiving `localReorderableSongs`;
    - subtitle count uses filtered/total (`:343-353`);
    - filtered-empty branch inside the existing `localReorderableSongs.isEmpty()` area (`:726`),
      checked **after** it so a genuinely empty playlist keeps its Add-songs copy.
@@ -275,13 +289,15 @@ Then:
 ## 10. Tests
 
 Unit — new `app/src/test/java/.../utils/PlaylistSongSearchTest.kt`, JUnit Jupiter
-(`org.junit.jupiter.api.Test`, per CONTRIBUTING):
+(`org.junit.jupiter.api.Test`, per CONTRIBUTING). The matcher is the only new logic, so this is
+where the coverage is; the screen change is wiring and gets the Compose test below:
 
 - blank and whitespace-only queries return the input list unchanged (same instance or equal)
 - case-insensitive title match; accented query matches unaccented song and vice versa
 - multi-token AND: `"miles kind"` matches "Kind of Blue" / "Miles Davis"; `"miles zappa"` does not
-- artist, album, album artist, genre, and file-name matches each on their own
+- artist, album, album artist and genre match each on their own
 - multi-artist songs match on any `artists[].name` and on `displayArtist`
+- a query that only appears in the file path does **not** match
 - duplicate songs keep every occurrence and original order
 - no match returns an empty list; a fresh `Song` list is not mutated
 
@@ -320,7 +336,7 @@ RTL (Arabic), landscape, large font scale, with keyboard open.
 | Reordering while filtered corrupts playlist order | Reorder disabled during search (§6); the commit path also checks the flag |
 | Index-based LazyColumn keys collide after filtering | Keys remain indices of the **displayed** list, which are unique and stable per query |
 | Keyboard covers the mini player / last rows under edge-to-edge (`MainActivity.kt:225`) | Field is top-anchored; add `Modifier.imePadding()` to the list's bottom `contentPadding` when the field is focused |
-| Filtered play changes what "last playlist" restores | Accepted and documented; queue snapshot still carries `playlistId` |
+| A user expects Play to respect the filter | Play/Shuffle are above the field and never change state while filtering; the filtered-empty state still offers Play, which reads as "these buttons are the playlist's, not the search's" |
 | Smart playlists refresh and drop a matched song | `refreshSmartPlaylistIfNeeded` (`PlaylistViewModel.kt:338`) re-derives the list; the query re-filters, so the view self-corrects |
 | Translated strings drifting from parity | Add all keys to all 14 `values*/` files in the same commit; flag non-English wording for native review in the PR |
 
@@ -337,11 +353,18 @@ RTL (Arabic), landscape, large font scale, with keyboard open.
   `./gradlew :app:compileDebugKotlin :app:lintDebug :app:testDebugUnitTest`. No `Co-Authored-By`
   trailer (CONTRIBUTING).
 
-## 14. Open questions
+## 14. Decisions
 
-1. Should the query persist when navigating to another playlist and back (needs ViewModel or
-   `SavedStateHandle`), or reset every time (current proposal)?
-2. Should Play/Shuffle play the filtered subset or always the whole playlist? Proposal: the
-   filtered subset, matching the visible list.
-3. Is matching on file name wanted, or is that noise for cloud songs (where the path is a remote
-   id-like string)?
+Resolved with the maintainer before implementation:
+
+1. **Query resets on navigation.** Leaving the playlist or switching to another one drops the
+   query; `rememberSaveable(playlistId)` gives that for free. No `SavedStateHandle` work.
+2. **Play/Shuffle always use the full playlist.** Search only filters the visible rows. Row taps
+   also play the full playlist from the tapped song. The existing playback call sites stay
+   untouched.
+3. **File-name matching dropped.** Metadata only (title/artist/album/album artist/genre); a
+   path match is noise for cloud songs and nobody indexes a playlist by file name.
+
+Remaining design detail left to implementation: whether the field sits under the app bar
+(current proposal) or replaces the Add/Remove/Reorder chip row. Both are one-line layout
+choices; the chip row is hidden while searching either way.
