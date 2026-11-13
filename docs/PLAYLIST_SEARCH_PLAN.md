@@ -94,9 +94,10 @@ Play/Shuffle row:
   later cleanup can point the two sheets at the same composable instead of three copies.
 - Focus is requested on open (`FocusRequester` + `LaunchedEffect { delay(150); requestFocus() }`,
   as `QueueBottomSheet.kt:1553-1557` does) so the keyboard opens immediately.
-- While the field is open, the Add / Remove / Reorder chip row (`:568-711`) is **hidden**. It is
-  the row that would otherwise be squeezed off-screen on short/landscape windows, and reorder is
-  illegal during a filtered view anyway (§6).
+- The Add / Remove / Reorder chip row (`:568-711`) stays visible and usable while searching.
+  Filtering is orthogonal to reordering and removing (§6), so nothing has to be taken away. On
+  windows shorter than ~480dp the chip row may collapse while the IME is open, purely for
+  vertical space.
 - `BackHandler(enabled = isSearchOpen)` closes the field instead of leaving the playlist.
   Closing always clears the query.
 - The query survives configuration changes (`rememberSaveable`) and resets when `playlistId`
@@ -184,13 +185,13 @@ Rules, explicitly:
 | --- | --- | --- |
 | Search icon | Closes field, clears query, restores full list | One-tap escape |
 | Back gesture | Same as above (`BackHandler`) | Expected on a focused field |
-| Reorder mode | Disabled and force-off when search opens; drag handles hidden while filtering | `ReorderableItem(key = entry.index)` and `reorderSongsInPlaylist(from, to)` address **display positions**; a filtered list would persist the wrong permutation |
+| Reorder mode | **Works while filtering.** A drop reports the new order of the displayed songs; the stored slots held by those songs take that order and every hidden song keeps its position | Reordering a subset is already the documented contract of `mergeVisiblePlaylistOrder` (`PlaylistOrderMerge.kt`), tested at `PlaylistPreferencesRepositoryTest.kt:58`; the index-based call was the only thing that could not express it |
 | Remove mode | Allowed; removal still uses song ids | `removeSongFromPlaylist(playlistId, song.id)` (`:875`) is id-based, so it stays correct |
 | Play | **Unchanged** — always plays the whole playlist, filtered or not | Search is a locator; play state must not depend on what is on screen |
 | Shuffle | **Unchanged** — shuffles the whole playlist | Same reasoning |
 | Tapping a result row | **Unchanged** — plays the whole playlist starting at that song, so playback continues past the matches | The tapped song is guaranteed to be a member of the full list, so the existing call needs no change |
 | Sort | Allowed; sorts the underlying playlist, list re-derives, scrolls to top | Filter and sort are orthogonal |
-| Add songs / playlist options | Unaffected (chip row hidden, app-bar overflow still available) | No coupling |
+| Add songs / playlist options | Unaffected; the chip row stays visible, the app-bar overflow still works | No coupling |
 | Song info sheet → remove from list | Removes by id; if it was the only match the empty-filter state appears | Consistent |
 | Cloud download of playlist | `CloudOfflineRepository.downloadCandidates(songsInPlaylist)` keeps using the **full** list | Downloading should not silently narrow to matches |
 | Leaving the screen | Query dropped | No hidden filter on return |
@@ -219,26 +220,71 @@ Keep the query **screen-local**; do not add it to `PlaylistUiState`:
 var isSearchOpen by rememberSaveable(playlistId) { mutableStateOf(false) }
 var searchQuery by rememberSaveable(playlistId) { mutableStateOf("") }
 
-val filteredSongs = remember(searchQuery, localReorderableSongs) {
-    if (searchQuery.isBlank()) localReorderableSongs
-    else PlaylistSongSearch.filter(localReorderableSongs, searchQuery)
+// localReorderableEntries is already List<IndexedValue<Song>>: the carried index is the row's
+// position in the full playlist, so it is a stable identity through filtering and dragging.
+val visibleEntries = remember(searchQuery, localReorderableEntries) {
+    if (searchQuery.isBlank()) localReorderableEntries
+    else localReorderableEntries.filter { PlaylistSongSearch.matches(it.value, searchQuery) }
 }
+var displayedEntries by remember(visibleEntries) { mutableStateOf(visibleEntries) }
+var hasPendingReorder by remember { mutableStateOf(false) }
 
-val displayedEntries = remember(filteredSongs) {
-    filteredSongs.mapIndexed { index, song -> index to song }
-}
+// onMove mutates displayedEntries and sets hasPendingReorder; the drop reports the new order:
+//   playlistViewModel.reorderPlaylistSongs(playlistId, displayedEntries.map { it.value.id })
 ```
+
+The `hasPendingReorder` flag replaces `lastMovedFrom` / `lastMovedTo` and matters: the ViewModel
+writes `MANUAL_ORDER_MODE` after a successful reorder, so a drag that ends where it started must
+not call it — otherwise touching a row would silently unsort a sorted playlist.
 
 Then:
 
-- `items(displayedEntries, key = { it.first })` replaces `items(localReorderableEntries, key = {
-  it.index })`. Index keys stay unique with duplicate songs, exactly as today.
-- `LaunchedEffect(isSearchOpen) { if (isSearchOpen) { isReorderModeEnabled = false; isRemoveModeEnabled = false } }`.
-- `remember(searchQuery, localReorderableSongs)` is the only place `filter` runs, and no
+- `items(displayedEntries, key = { it.index })` keeps today's key expression; the index is the
+  row's full-playlist position, so it stays unique with duplicate songs and stable during a drag.
+- No mode is force-off. Nothing in `LaunchedEffect(isSearchOpen)` is needed.
+- `remember(searchQuery, localReorderableEntries)` is the only place `filter` runs, and no
   `.toImmutableList()` is added on a per-frame path (CONTRIBUTING: `toImmutableList()` is O(n)).
   Nothing new enters `@Composable` parameters except the local `List<Song>`, which the screen
   already passes around.
-- Reorder commit path (`:281-290`) is left untouched, but guarded by `!isSearchOpen`.
+- Play / Shuffle / row taps keep reading `localReorderableSongs` (§6), unaffected by filtering.
+
+### 7.1 Why reorder must not be disabled
+
+`PlaylistPreferencesRepository.reorderSongsInPlaylist(playlistId, newSongOrderIds)` does **not**
+expect a full permutation. `mergeVisiblePlaylistOrder` (`data/playlist/PlaylistOrderMerge.kt`)
+walks the stored ids, fills the slots held by ids that appear in the caller's list, and leaves
+every other id where it is; its KDoc describes the detail screen's resolved-only list as the
+intended caller. A search result is the same shape — a visible subset — so the repository can
+already persist it. There is a test for exactly this (`PlaylistPreferencesRepositoryTest.kt:58`):
+stored `[a, hidden, b]`, visible `[b, a]` → `[b, hidden, a]`.
+
+What cannot express it is the ViewModel's `(fromIndex, toIndex)` contract, which applies the move
+to the *full* list and therefore only makes sense for an unfiltered view. So the change is to the
+call contract, not to the feature's availability:
+
+```kotlin
+// PlaylistViewModel.kt — replaces reorderSongsInPlaylist(playlistId, fromIndex, toIndex)
+fun reorderPlaylistSongs(playlistId: String, newVisibleOrder: List<String>) {
+    if (isFolderPlaylistId(playlistId)) return
+    val currentPlaylist = _uiState.value.currentPlaylistDetails ?: return
+    if (currentPlaylist.id != playlistId || currentPlaylist.isSmartPlaylist) return
+    viewModelScope.launch {
+        val currentSongs = _uiState.value.currentPlaylistSongs
+        val fullOrder = playlistPreferencesRepository
+            .reorderSongsInPlaylist(playlistId, newVisibleOrder) ?: return@launch reload(playlistId)
+        // fullOrder is a permutation of the stored ids; currentPlaylistSongs holds the resolved
+        // subset, so rebuild it by occurrence (a playlist may hold the same id twice).
+        val pool = currentSongs.groupBy { it.id }.mapValues { it.value.toMutableList() }
+        val reordered = fullOrder.mapNotNull { id -> pool[id]?.removeFirstOrNull() }
+        // …then the existing optimistic state update + MANUAL_ORDER_MODE write, with `reordered`
+    }
+}
+```
+
+Example: stored `[A,B,C,D,E]`, query matches `B` and `D`, drag `D` above `B` → displayed
+`[D,B]` → stored `[A,D,C,B,E]`. `C` never moves, and the filtered view shows exactly the drop.
+Unfiltered reorder is the case where the visible order is the whole list, so both paths collapse
+into one and the index arithmetic (`removeAt`/`add`, `lastMovedFrom`/`lastMovedTo`) is deleted.
 
 ---
 
@@ -249,25 +295,32 @@ Then:
    `OutlinedTextField` extracted from `SongPickerSearchField` (`SongPickerBottomSheet.kt:435`),
    parameterized by value / onValueChange / hint / modifier. Reused by the playlist screen now;
    the two existing call sites can adopt it later without behaviour change.
-3. **`PlaylistDetailScreen.kt`** (~70 changed lines, all additive):
+3. **`PlaylistViewModel.reorderSongsInPlaylist` → `reorderPlaylistSongs(playlistId,
+   newVisibleOrder)`** (§7.1). One caller (`PlaylistDetailScreen.kt:286`), no other consumers, and
+   it replaces index arithmetic with the repository's existing subset merge. Net deletion.
+4. **`PlaylistDetailScreen.kt`** (~70 changed lines, mostly additive):
    - search `IconButton` in `actions` before sort (`:369`);
    - `BackHandler` + focus/IME handling + `InlineSearchField` row between `Column {` (`:383`) and
      the Play/Shuffle row;
-   - hide the chip row while `isSearchOpen`, force off remove/reorder modes;
-   - `filteredSongs` / `displayedEntries`; swap the `items(...)` source and its `key` (`:775`);
+   - `visibleEntries` / `displayedEntries`; swap the `items(...)` source (`:775`) — the key
+     expression is unchanged;
+   - drop handler reports `displayedEntries.map { it.value.id }` instead of from/to indices, and
+     `lastMovedFrom` / `lastMovedTo` are replaced by a single `hasPendingReorder` flag;
+   - the unfiltered drag path uses the same state, so drag handling stops mutating
+     `localReorderableEntries` and both modes share one code path;
    - **no change** to the play/shuffle/row-tap call sites (`:432`, `:474`, `:809`) — they keep
      receiving `localReorderableSongs`;
    - subtitle count uses filtered/total (`:343-353`);
    - filtered-empty branch inside the existing `localReorderableSongs.isEmpty()` area (`:726`),
      checked **after** it so a genuinely empty playlist keeps its Add-songs copy.
-4. **Strings** — new keys in `res/values/strings_presentation_batch_b.xml` (where the rest of
+5. **Strings** — new keys in `res/values/strings_presentation_batch_b.xml` (where the rest of
    this screen's copy lives), plus the same keys in all 13 translated `values-*/` folders: the
    repo currently holds ~2066 strings per locale, so parity is expected. Keys:
    `playlist_search_open`, `playlist_search_hint`, `playlist_search_clear`,
    `playlist_search_empty_title`, `playlist_search_empty_body`,
    `playlist_search_match_count` (`%1$d of %2$d songs`, as a `<plurals>` on the total count).
-5. **Tests** (below).
-6. **Docs** — no README change; the CHANGELOG is release-generated, so leave it alone.
+6. **Tests** (below).
+7. **Docs** — no README change; the CHANGELOG is release-generated, so leave it alone.
 
 ---
 
@@ -301,11 +354,22 @@ where the coverage is; the screen change is wiring and gets the Compose test bel
 - duplicate songs keep every occurrence and original order
 - no match returns an empty list; a fresh `Song` list is not mutated
 
+Unit — reorder under a filter. Existing coverage in
+`data/playlist/PlaylistOrderMergeTest.kt` and `PlaylistPreferencesRepositoryTest.kt:58` already
+asserts that a subset order leaves hidden ids in place, which is the whole mechanism (§7.1). Add:
+
+- the plan's example: stored `[A,B,C,D,E]`, visible `[D,B]` → `[A,D,C,B,E]`
+- a duplicate id that is only partly visible is refused (exists at
+  `PlaylistPreferencesRepositoryTest.kt:66`; keep it as the regression guard)
+- the ViewModel's rebuild step, if extracted as a pure `rebuildResolvedSongs(fullOrder, currentSongs)`
+  helper — same id twice with one occurrence unresolved → occurrence order preserved
+
 Compose — `app/src/androidTest/.../presentation/screens/PlaylistSearchFieldTest.kt`, using the
 `createComposeRule()` + Truth pattern from `CreatePlaylistDialogTest.kt`:
 
 - typing filters a stub list; clearing restores all rows
 - empty-result state shows the query and the clear button returns the full list
+- reorder mode and search field are usable at the same time (no mode is force-off)
 
 Manual QA matrix (worth listing in the PR): local playlist, folder playlist, smart playlist,
 Navidrome playlist, Jellyfin playlist, playlist with duplicate songs, 1000+ song playlist,
@@ -333,8 +397,10 @@ RTL (Arabic), landscape, large font scale, with keyboard open.
 
 | Risk | Mitigation |
 | --- | --- |
-| Reordering while filtered corrupts playlist order | Reorder disabled during search (§6); the commit path also checks the flag |
-| Index-based LazyColumn keys collide after filtering | Keys remain indices of the **displayed** list, which are unique and stable per query |
+| Reordering while filtered writes the wrong permutation | It cannot: the drop reports an id order and `mergeVisiblePlaylistOrder` fills only the slots those ids already hold, refusing anything that is not a permutation of the visible multiset. Worth an explicit test with a hidden song and with a duplicate |
+| The reorder contract change breaks another caller | `reorderSongsInPlaylist` has exactly one caller (`PlaylistDetailScreen.kt:286`) and no test references the index API |
+| LazyColumn keys collide after filtering | Keys stay the row's full-playlist index, which is unique and travels with the row through filtering and dragging |
+| Sorted-mode reorder behaves oddly | Pre-existing: a drop materializes the current visible order into the stored slots and flips the playlist to manual order. Filtering simply narrows which slots are touched — no new behaviour, but call it out in the PR |
 | Keyboard covers the mini player / last rows under edge-to-edge (`MainActivity.kt:225`) | Field is top-anchored; add `Modifier.imePadding()` to the list's bottom `contentPadding` when the field is focused |
 | A user expects Play to respect the filter | Play/Shuffle are above the field and never change state while filtering; the filtered-empty state still offers Play, which reads as "these buttons are the playlist's, not the search's" |
 | Smart playlists refresh and drop a matched song | `refreshSmartPlaylistIfNeeded` (`PlaylistViewModel.kt:338`) re-derives the list; the query re-filters, so the view self-corrects |
@@ -347,8 +413,10 @@ RTL (Arabic), landscape, large font scale, with keyboard open.
 - Branch: `feature/playlist-search`
 - Commits, one logical step each:
   1. `Add a pure playlist song matcher` (matcher + unit tests)
-  2. `Extract the pill search field into a shared composable`
-  3. `Filter songs in the playlist screen with a search field` (screen wiring + strings + compose test)
+  2. `Reorder playlist songs by visible order` (ViewModel contract change, index arithmetic removed,
+     subset merge tests) — lands first and is behaviour-preserving for the unfiltered screen
+  3. `Extract the pill search field into a shared composable`
+  4. `Filter songs in the playlist screen with a search field` (screen wiring + strings + compose test)
 - PR body: what changed, the interaction matrix above, and the output of
   `./gradlew :app:compileDebugKotlin :app:lintDebug :app:testDebugUnitTest`. No `Co-Authored-By`
   trailer (CONTRIBUTING).
@@ -364,6 +432,9 @@ Resolved with the maintainer before implementation:
    untouched.
 3. **File-name matching dropped.** Metadata only (title/artist/album/album artist/genre); a
    path match is noise for cloud songs and nobody indexes a playlist by file name.
+4. **Reorder stays available while filtering.** Disabling it was a workaround for an index-based
+   reorder API; the repository's subset merge already expresses the operation, so the plan now
+   moves the ViewModel to a visible-order contract instead (§7.1).
 
 Remaining design detail left to implementation: whether the field sits under the app bar
 (current proposal) or replaces the Add/Remove/Reorder chip row. Both are one-line layout
