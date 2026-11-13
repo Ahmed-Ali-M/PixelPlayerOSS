@@ -1,124 +1,63 @@
 # Playlist search — implementation plan
 
 Status: proposed
-Scope: filter songs **inside one playlist** (`PlaylistDetailScreen`), local / Navidrome /
-Jellyfin / folder playlists alike.
+Approach: **a search sheet that finds a song and jumps to it in the playlist**
+Scope: any playlist detail screen (`PlaylistDetailScreen`), local / Navidrome / Jellyfin / folder /
+smart playlists alike.
 
 ---
 
 ## 1. Goal
 
-When a playlist has 2000 songs, finding one means scrolling through 2000 rows. Add a search
-field on the playlist screen that narrows the visible rows as the user types, so a song can be
-located in seconds.
+When a playlist has 2000 songs, finding one means scrolling. The search icon opens a sheet in the
+app's existing search-dialog style; typing filters the playlist's songs into a short result list;
+tapping a result closes the sheet and takes the user to that song in the playlist.
 
-**Search is a locator, not a mode.** It changes what is *shown*, never what *plays*: Play,
-Shuffle and tapping a result all keep using the full playlist (§6). That keeps the feature tiny
-and removes every playback edge case.
-
-Non-goals:
-
-- No change to the global `SearchScreen` (bottom-nav tab) or its history/filters.
-- No new playlist-name search in the Library playlists tab (`searchPlaylists` already backs
-  the add-to-playlist sheet).
-- No change to playback, queue or play-count semantics.
-- No fuzzy/relevance ranking, no lyrics search, no saved query, no persistence across
-  navigation.
+Search is a **locator**. It changes nothing about the playlist, the queue, the sort order or the
+playback state — it only moves the viewport to a row.
 
 ---
 
-## 2. How the playlist screen works today
-
-| Concern | Where |
-| --- | --- |
-| Screen scaffold, app bar, actions | `presentation/screens/PlaylistDetailScreen.kt:169` |
-| Loaded, already-sorted songs | `uiState.currentPlaylistSongs` → `PlaylistDetailScreen.kt:214` |
-| Display list (index-keyed copy) | `localReorderableEntries` / `localReorderableSongs` — `:256-261` |
-| Drag-to-reorder | `rememberReorderableLazyListState` — `:270`, persisted through `PlaylistViewModel.reorderSongsInPlaylist` (`PlaylistViewModel.kt:624`) |
-| App bar title/cover/subtitle | `:312`, count + duration at `:343-353` |
-| App bar actions (sort, options) | `:369-392` |
-| Play / Shuffle | `:432`, `:474` — both pass `localReorderableSongs` and `currentPlaylist.id` |
-| Empty state | `:726` |
-| Song rows | `items(...) key = { it.index }` — `:775`, row click plays at `:809` |
-| Sort sheet | `:1172-1220` → `PlaylistViewModel.sortPlaylistSongs` (`:684`) |
-
-Two properties of that layout drive the whole design:
-
-1. The list is a **presentation-order copy**, and reordering persists by **position**
-   (`reorderSongsInPlaylist(playlistId, fromIndex, toIndex)`), while removal persists by
-   **song id** (`removeSongFromPlaylist(playlistId, songId)`).
-2. Every song the playlist can play is already in memory, so filtering needs no I/O.
-
----
-
-## 3. Decision: filter in memory, not through the repository
+## 2. Decision record
 
 | Option | Verdict |
 | --- | --- |
-| Reuse `SearchStateHolder` + `MusicRepository.searchSongs` (FTS, `SEARCH_RESULTS_LIMIT = 100`, `MusicRepositoryImpl.kt:99`) and intersect with playlist ids | Rejected: capped at 100 hits, misses Navidrome/Jellyfin songs that are not in the local `songs` table, drops duplicate occurrences, and re-sorts by relevance instead of playlist order |
-| New DAO query `WHERE playlist_id = ? AND title LIKE ?` | Rejected: three cloud/local sources, no per-source playlist join in one query, and it duplicates the source of truth already loaded in the ViewModel |
-| In-memory `List<Song>.filter` over `currentPlaylistSongs` | **Chosen**: works offline and for cloud songs, preserves sort/manual order and duplicates, O(n) on an already-resident list, and stays testable as a pure function |
+| **Search sheet → dismiss → scroll to the row** (this plan) | **Chosen.** No playlist state is touched, so nothing can disagree with reorder, sort, removal, smart refresh or playback. Directly delivers "locate the song". Built from the app's existing sheet + pill field + song row. |
+| Filter the playlist list in place, list stays filtered while the query is active | Rejected. More surface area than the goal needs: filtered list state, "X of Y" header, filtered-empty state, chip-row layout, `imePadding`, plus a reorder contract change (see below). Worse at the actual goal: after filtering, the user still has to clear the query to see the song in context. |
+| `MusicRepository.searchSongs` + intersect with playlist ids | Rejected. FTS with a 100-hit cap (`MusicRepositoryImpl.kt:99`), misses Navidrome/Jellyfin songs absent from the local `songs` table, and re-ranks by relevance instead of playlist order. |
 
-In-memory matching also matches what the app already does in three other sheets:
-`QueueBottomSheet.kt:1521-1532`, `SongPickerBottomSheet.kt:294-321`,
-`PlaylistBottomSheet.kt:74-80`. This plan only adds the multi-field/token behaviour those spots
-lack.
+Kept from the rejected design because it is needed either way: the pure matcher (§4), the shared
+pill search field (§6), and the matching/a11y/i18n rules.
 
----
-
-## 4. UX
-
-**Entry point** — a `Search` icon in the playlist app-bar `actions` row, left of the existing
-sort icon (`PlaylistDetailScreen.kt:369`). Same `IconButton` treatment as sort, so the app bar
-does not grow. `contentDescription` from a new string.
-
-**Active state** — a pill search field slides in directly under the app bar, above the
-Play/Shuffle row:
-
-```
-┌──────────────────────────────────┐
-│ ←   Playlist name            🔍 ⋮ │   ← search icon toggles
-│ n songs · 3 h 12 m               │
-├──────────────────────────────────┤
-│ 🔍  Search songs in playlist  ✕  │   ← new, focused, IME open
-├──────────────────────────────────┤
-│ [   Play   ] [  Shuffle  ]       │
-│ … filtered rows …                │
-└──────────────────────────────────┘
-```
-
-- The field reuses the app's existing search-field styling (`OutlinedTextField` with
-  `surfaceContainerHigh`, transparent indicators, `CircleShape`, leading `Search`, trailing
-  `Clear`) — the exact block at `SongPickerBottomSheet.kt:435-470`. Factor it into
-  `presentation/components/InlineSearchField.kt` and reuse it from the playlist screen, so a
-  later cleanup can point the two sheets at the same composable instead of three copies.
-- Focus is requested on open (`FocusRequester` + `LaunchedEffect { delay(150); requestFocus() }`,
-  as `QueueBottomSheet.kt:1553-1557` does) so the keyboard opens immediately.
-- The Add / Remove / Reorder chip row (`:568-711`) stays visible and usable while searching.
-  Filtering is orthogonal to reordering and removing (§6), so nothing has to be taken away. On
-  windows shorter than ~480dp the chip row may collapse while the IME is open, purely for
-  vertical space.
-- `BackHandler(enabled = isSearchOpen)` closes the field instead of leaving the playlist.
-  Closing always clears the query.
-- The query survives configuration changes (`rememberSaveable`) and resets when `playlistId`
-  changes, so no stale filter follows you into another playlist.
-
-**While filtering**
-
-- Subtitle becomes `"%1$d of %2$d songs · %3$s"` (matched count, total, matched duration), so the
-  header still says how much of the playlist is on screen. Use the same `formatSongCount` /
-  `formatTotalDuration` helpers, fed the filtered list.
-- Empty result: keep the list area, show `SearchOff` icon + `No songs match "<query>"` +
-  `Clear search` text button. This is deliberately distinct from the playlist-empty state at
-  `:726` (which offers Add songs) — an empty playlist and an empty filter are different stories.
-- Changing the query scrolls to the top of the filtered list (same `LaunchedEffect` + `delay(100)
-  + scrollToItem(0)` guard the sort sheet uses at `:1206`).
+Preserved finding, in case in-place filtering is ever revisited: `mergeVisiblePlaylistOrder`
+(`data/playlist/PlaylistOrderMerge.kt`) already persists a *subset* order — stored slots held by
+the given ids take the new order, hidden ids keep their positions, duplicates compared as a
+multiset, covered by `PlaylistPreferencesRepositoryTest.kt:58`. The only thing that could not
+express a filtered reorder was the ViewModel's `(fromIndex, toIndex)` API. That work is **not
+needed here** and is dropped.
 
 ---
 
-## 5. Matching rules
+## 3. How the playlist screen works today
 
-New pure object: `utils/PlaylistSongSearch.kt`.
+| Concern | Where |
+| --- | --- |
+| Screen + app bar + actions | `presentation/screens/PlaylistDetailScreen.kt:169` |
+| Loaded, already-sorted songs | `uiState.currentPlaylistSongs` → `:214` |
+| Display list, index-carried | `localReorderableEntries` / `localReorderableSongs` — `:256-261` |
+| App bar actions (sort, overflow) | `:369-392` |
+| List | `LazyColumn(state = listState)`, `items(..., key = { it.index })` — `:760`, `:775` |
+| Scroll target | `listState` (already created at `:263`) |
+| Song rows | `QueuePlaylistSongItem` (`QueueBottomSheet.kt:1892`) |
+
+Two facts make this feature small: every playlist song is already in memory, and the list is
+indexed by `IndexedValue.index`, so a result can name its exact row.
+
+---
+
+## 4. Matching rules
+
+New pure object `utils/PlaylistSongSearch.kt`, used by the sheet only:
 
 ```kotlin
 package com.lostf1sh.pixelplayeross.utils
@@ -127,10 +66,10 @@ import com.lostf1sh.pixelplayeross.data.model.Song
 import com.lostf1sh.pixelplayeross.data.playlist.nlp.NlpText
 
 /**
- * Client-side matcher for the playlist search field.
+ * Matcher for the playlist search sheet.
  *
- * The playlist screen already holds every song it can play, so the query is matched in memory
- * and the playlist's own order is kept: no ranking, no result cap, no DB round-trip.
+ * The playlist screen already holds every song it can play, so the query is matched in memory and
+ * the playlist's own order is kept: no ranking, no result cap, no DB round-trip.
  *
  * A query is split into whitespace-separated tokens and every token must match the song, so
  * "miles kind" finds "Kind of Blue" by "Miles Davis". Matching is case- and accent-insensitive
@@ -145,11 +84,11 @@ object PlaylistSongSearch {
         return tokens.all { token -> fields.any { it.contains(token) } }
     }
 
-    fun filter(songs: List<Song>, query: String): List<Song> =
-        if (query.isBlank()) songs else songs.filter { matches(it, query) }
+    fun filterEntries(entries: List<IndexedValue<Song>>, query: String): List<IndexedValue<Song>> =
+        if (query.isBlank()) entries else entries.filter { matches(it.value, query) }
 
-    /** Metadata a user actually indexes by. The file path is deliberately left out: it adds
-     *  noise (remote ids for cloud songs) without helping anyone find a track by name. */
+    /** Metadata a user indexes by. The file path is left out: it adds noise (remote ids for
+     *  cloud songs) without helping anyone find a track by name. */
     private fun Song.searchableFields(): List<String> = buildList {
         add(NlpText.normalize(title))
         add(NlpText.normalize(artist))
@@ -162,280 +101,229 @@ object PlaylistSongSearch {
 }
 ```
 
-Rules, explicitly:
+Rules:
 
-- Blank / whitespace-only query returns the untouched list (no filtering cost on entry).
-- Case-insensitive and diacritic-insensitive: `"melancolico"` matches `"Melancólico"`, `"cafe"`
-  matches `"Café"`.
-- All tokens must match (AND), each token against any field (OR across fields).
-- Substring match, not word-prefix: `"art"` matches `"Artist"`. Consistent with the other
-  in-app filters; no fuzzy matching, no typo tolerance.
-- Playlist order is preserved — no relevance ranking — and duplicate occurrences of the same
-  song stay separate rows.
-- Metadata only: title, artist, `displayArtist`, every `artists[]` entry, album, album artist,
-  genre. File name / path is **not** matched.
-- `NlpText` is reused rather than copied (`data/playlist/nlp/NlpText.kt:30`), but **not** its
-  stemmer: stemming is right for mood queries and wrong for title search.
+- Blank query shows the whole playlist (so the sheet doubles as a scrollable jump list).
+- Case- and diacritic-insensitive: `"melancolico"` matches `"Melancólico"`.
+- Tokens AND together, each token matches any field.
+- Substring match (`"art"` → `"Artist"`); no fuzzy matching, no typo tolerance.
+- Playlist order preserved, no relevance ranking, no result cap.
+- Metadata only: title, artist, `displayArtist`, every `artists[]` name, album, album artist,
+  genre. File path excluded.
+- `NlpText` is reused (`data/playlist/nlp/NlpText.kt:30`) but **not** its stemmer: stemming is
+  right for mood queries, wrong for title search.
 
 ---
 
-## 6. Interaction matrix
+## 5. UX
 
-| Toggle | Behaviour while a query is active | Why |
-| --- | --- | --- |
-| Search icon | Closes field, clears query, restores full list | One-tap escape |
-| Back gesture | Same as above (`BackHandler`) | Expected on a focused field |
-| Reorder mode | **Works while filtering.** A drop reports the new order of the displayed songs; the stored slots held by those songs take that order and every hidden song keeps its position | Reordering a subset is already the documented contract of `mergeVisiblePlaylistOrder` (`PlaylistOrderMerge.kt`), tested at `PlaylistPreferencesRepositoryTest.kt:58`; the index-based call was the only thing that could not express it |
-| Remove mode | Allowed; removal still uses song ids | `removeSongFromPlaylist(playlistId, song.id)` (`:875`) is id-based, so it stays correct |
-| Play | **Unchanged** — always plays the whole playlist, filtered or not | Search is a locator; play state must not depend on what is on screen |
-| Shuffle | **Unchanged** — shuffles the whole playlist | Same reasoning |
-| Tapping a result row | **Unchanged** — plays the whole playlist starting at that song, so playback continues past the matches | The tapped song is guaranteed to be a member of the full list, so the existing call needs no change |
-| Sort | Allowed; sorts the underlying playlist, list re-derives, scrolls to top | Filter and sort are orthogonal |
-| Add songs / playlist options | Unaffected; the chip row stays visible, the app-bar overflow still works | No coupling |
-| Song info sheet → remove from list | Removes by id; if it was the only match the empty-filter state appears | Consistent |
-| Cloud download of playlist | `CloudOfflineRepository.downloadCandidates(songsInPlaylist)` keeps using the **full** list | Downloading should not silently narrow to matches |
-| Leaving the screen | Query dropped | No hidden filter on return |
+**Entry** — a `Search` icon in the playlist app-bar `actions` row, left of the existing sort icon
+(`:369`). Same `IconButton` treatment as sort, so the app bar does not grow.
 
-Playback consequence: none. The queue snapshot, play counts, transitions and the last-playlist
-tile all keep seeing the full playlist, because every playback call keeps receiving
-`localReorderableSongs` (`:432`, `:474`, `:809`). Those three call sites must **not** be touched
-by this feature — that is the check that the locator semantics stayed intact in review.
+**Sheet** — a `ModalBottomSheet` with `skipPartiallyExpanded = true`, matching
+`SongPickerBottomSheet`: the playlist stays dimly visible behind it, and the pill field + result
+rows are exactly the design already used for picking songs. (The full-screen `Dialog` variant in
+`QueueBottomSheet.kt:1500-1900` is the fallback if a phone-height sheet feels cramped.)
 
-Also: Play/Shuffle stay enabled while a query is active, even with zero matches. Disabling them
-would imply playback follows the filter, which it does not.
+```
+┌──────────────────────────────────┐
+│         Find in playlist         │
+│ 🔍  Search songs…            ✕  │   focused, IME open
+│ ┌──────────────────────────────┐ │
+│ │ [art] Song title             │ │   ← tap: close + jump
+│ │       Artist · Album         │ │
+│ └──────────────────────────────┘ │
+│ …                                │
+└──────────────────────────────────┘
+```
 
----
+- Field: the pill `OutlinedTextField` from `SongPickerBottomSheet.kt:435-470` (`surfaceContainerHigh`,
+  transparent indicators, `CircleShape`, leading `Search`, trailing `Clear`), extracted to
+  `presentation/components/InlineSearchField.kt` and reused. Focus requested on open.
+- Rows: `EnhancedSongListItem` (`components/subcomps/EnhancedSongListItem.kt:123`) with
+  `showMoreOptionsButton = false`, so the sheet is a pure locator.
+- Empty result: `SearchOff` icon + `No songs match "<query>"`, in the style of the existing dialog
+  empty state (`QueueBottomSheet.kt:1810-1830`).
+- Back / dismissal closes without moving the list.
 
-## 7. State and data flow
+**On tap — the part that makes it work**
 
-Keep the query **screen-local**; do not add it to `PlaylistUiState`:
-
-- `PlaylistUiState` is read by the library screen and the add-to-playlist sheet; a query there
-  would leak into other screens.
-- Screen-local `rememberSaveable` survives config changes, and its default on `playlistId`
-  change gives the reset-on-navigate behaviour for free.
+1. Sheet calls `onSongSelected(entry)` with the row's carried index and song id.
+2. The sheet hides (`sheetState.hide()`), then the screen scrolls the playlist list.
+3. Because a scroll in a 2000-row list is disorienting on its own, the target row **flashes a
+   tint** for ~1.5s so the user sees which row is theirs.
 
 ```kotlin
 // PlaylistDetailScreen.kt
-var isSearchOpen by rememberSaveable(playlistId) { mutableStateOf(false) }
-var searchQuery by rememberSaveable(playlistId) { mutableStateOf("") }
+var pendingScrollIndex by remember { mutableStateOf<Int?>(null) }
+var highlightedIndex by remember { mutableStateOf<Int?>(null) }
 
-// localReorderableEntries is already List<IndexedValue<Song>>: the carried index is the row's
-// position in the full playlist, so it is a stable identity through filtering and dragging.
-val visibleEntries = remember(searchQuery, localReorderableEntries) {
-    if (searchQuery.isBlank()) localReorderableEntries
-    else localReorderableEntries.filter { PlaylistSongSearch.matches(it.value, searchQuery) }
+LaunchedEffect(pendingScrollIndex) {
+    val target = pendingScrollIndex ?: return@LaunchedEffect
+    // Resolve against the current list: a smart playlist may have refreshed while the sheet was
+    // open, and a duplicate id must land on the occurrence that was tapped.
+    val index = localReorderableEntries.getOrNull(target)?.takeIf { it.index == target }?.index
+        ?: localReorderableEntries.indexOfFirst { it.value.id == selectedSongId }
+    if (index >= 0) {
+        listState.scrollToItem(index)          // instant; the flash explains where we landed
+        highlightedIndex = index
+        delay(1_500)
+        highlightedIndex = null
+    }
+    pendingScrollIndex = null
 }
-var displayedEntries by remember(visibleEntries) { mutableStateOf(visibleEntries) }
-var hasPendingReorder by remember { mutableStateOf(false) }
-
-// onMove mutates displayedEntries and sets hasPendingReorder; the drop reports the new order:
-//   playlistViewModel.reorderPlaylistSongs(playlistId, displayedEntries.map { it.value.id })
 ```
 
-The `hasPendingReorder` flag replaces `lastMovedFrom` / `lastMovedTo` and matters: the ViewModel
-writes `MANUAL_ORDER_MODE` after a successful reorder, so a drag that ends where it started must
-not call it — otherwise touching a row would silently unsort a sorted playlist.
+`scrollToItem` rather than `animateScrollToItem`: Compose animates a long jump as a visible
+fly-through, which is slower and no clearer than landing with a flash. One constant to tune if it
+feels abrupt.
 
-Then:
+Row highlight is a wrapping `Modifier.background(animatedColor, shape)` around
+`QueuePlaylistSongItem` inside the existing `ReorderableItem` (`:790-870`), driven by
+`highlightedIndex == entry.index`. No signature change to the row composable.
 
-- `items(displayedEntries, key = { it.index })` keeps today's key expression; the index is the
-  row's full-playlist position, so it stays unique with duplicate songs and stable during a drag.
-- No mode is force-off. Nothing in `LaunchedEffect(isSearchOpen)` is needed.
-- `remember(searchQuery, localReorderableEntries)` is the only place `filter` runs, and no
-  `.toImmutableList()` is added on a per-frame path (CONTRIBUTING: `toImmutableList()` is O(n)).
-  Nothing new enters `@Composable` parameters except the local `List<Song>`, which the screen
-  already passes around.
-- Play / Shuffle / row taps keep reading `localReorderableSongs` (§6), unaffected by filtering.
+---
 
-### 7.1 Why reorder must not be disabled
+## 6. State and data flow
 
-`PlaylistPreferencesRepository.reorderSongsInPlaylist(playlistId, newSongOrderIds)` does **not**
-expect a full permutation. `mergeVisiblePlaylistOrder` (`data/playlist/PlaylistOrderMerge.kt`)
-walks the stored ids, fills the slots held by ids that appear in the caller's list, and leaves
-every other id where it is; its KDoc describes the detail screen's resolved-only list as the
-intended caller. A search result is the same shape — a visible subset — so the repository can
-already persist it. There is a test for exactly this (`PlaylistPreferencesRepositoryTest.kt:58`):
-stored `[a, hidden, b]`, visible `[b, a]` → `[b, hidden, a]`.
-
-What cannot express it is the ViewModel's `(fromIndex, toIndex)` contract, which applies the move
-to the *full* list and therefore only makes sense for an unfiltered view. So the change is to the
-call contract, not to the feature's availability:
+No `PlaylistUiState` change, no ViewModel change, no repository change. Everything lives in the
+screen:
 
 ```kotlin
-// PlaylistViewModel.kt — replaces reorderSongsInPlaylist(playlistId, fromIndex, toIndex)
-fun reorderPlaylistSongs(playlistId: String, newVisibleOrder: List<String>) {
-    if (isFolderPlaylistId(playlistId)) return
-    val currentPlaylist = _uiState.value.currentPlaylistDetails ?: return
-    if (currentPlaylist.id != playlistId || currentPlaylist.isSmartPlaylist) return
-    viewModelScope.launch {
-        val currentSongs = _uiState.value.currentPlaylistSongs
-        val fullOrder = playlistPreferencesRepository
-            .reorderSongsInPlaylist(playlistId, newVisibleOrder) ?: return@launch reload(playlistId)
-        // fullOrder is a permutation of the stored ids; currentPlaylistSongs holds the resolved
-        // subset, so rebuild it by occurrence (a playlist may hold the same id twice).
-        val pool = currentSongs.groupBy { it.id }.mapValues { it.value.toMutableList() }
-        val reordered = fullOrder.mapNotNull { id -> pool[id]?.removeFirstOrNull() }
-        // …then the existing optimistic state update + MANUAL_ORDER_MODE write, with `reordered`
-    }
-}
+var isSearchSheetVisible by rememberSaveable(playlistId) { mutableStateOf(false) }
 ```
 
-Example: stored `[A,B,C,D,E]`, query matches `B` and `D`, drag `D` above `B` → displayed
-`[D,B]` → stored `[A,D,C,B,E]`. `C` never moves, and the filtered view shows exactly the drop.
-Unfiltered reorder is the case where the visible order is the whole list, so both paths collapse
-into one and the index arithmetic (`removeAt`/`add`, `lastMovedFrom`/`lastMovedTo`) is deleted.
+- The sheet receives `entries: ImmutableList<IndexedValue<Song>>` (built from
+  `localReorderableEntries`, which is already index-carrying) and keeps its own query with
+  `rememberSaveable` inside the sheet, so rotation does not lose typing.
+- The query dies with the sheet: reopening starts empty.
+- A query does not survive navigation between playlists, by construction.
+- `isSearchSheetVisible` is `rememberSaveable(playlistId)` so switching playlists closes it.
+
+---
+
+## 7. Edge cases
+
+| Case | Behaviour |
+| --- | --- |
+| Duplicate song ids in a playlist | Result carries the exact occurrence index, and the resolver prefers that index before falling back to the first id match |
+| Smart playlist refreshes while the sheet is open | Resolver checks the tapped index still holds the tapped song id, otherwise falls back to id lookup, otherwise no scroll |
+| Song removed from the playlist while the sheet is open | Not found → sheet closes, list does not move, no error |
+| Reorder / remove mode active | Untouched. Jumping scrolls to the row with its drag handle or remove button visible |
+| Sort changes while the sheet is open | Sheet's list is a snapshot; the jump resolves against the live list |
+| Folder / cloud playlists | Same code path; they populate `currentPlaylistSongs` identically |
+| Playlist shorter than the sheet | Field + rows still work; the sheet simply shows the whole playlist |
+| Keyboard | Sheet owns IME handling (`imePadding`, as `QueueBottomSheet.kt:1805`), the playlist list is untouched |
 
 ---
 
 ## 8. Implementation steps
 
-1. **`utils/PlaylistSongSearch.kt`** (new, ~50 lines) — matcher above, with KDoc.
-2. **`presentation/components/InlineSearchField.kt`** (new, ~40 lines) — the pill
-   `OutlinedTextField` extracted from `SongPickerSearchField` (`SongPickerBottomSheet.kt:435`),
-   parameterized by value / onValueChange / hint / modifier. Reused by the playlist screen now;
-   the two existing call sites can adopt it later without behaviour change.
-3. **`PlaylistViewModel.reorderSongsInPlaylist` → `reorderPlaylistSongs(playlistId,
-   newVisibleOrder)`** (§7.1). One caller (`PlaylistDetailScreen.kt:286`), no other consumers, and
-   it replaces index arithmetic with the repository's existing subset merge. Net deletion.
-4. **`PlaylistDetailScreen.kt`** (~70 changed lines, mostly additive):
+1. **`utils/PlaylistSongSearch.kt`** (new, ~45 lines) — matcher above, with unit tests.
+2. **`presentation/components/InlineSearchField.kt`** (new, ~40 lines) — pill field extracted from
+   `SongPickerBottomSheet.kt:435`; parameterized by value / onValueChange / hint / modifier.
+3. **`presentation/components/PlaylistSongSearchSheet.kt`** (new, ~150 lines) — `ModalBottomSheet`,
+   field, `EnhancedSongListItem` results, empty state, `onSongSelected(entry)`.
+4. **`PlaylistDetailScreen.kt`** (~35 changed lines):
    - search `IconButton` in `actions` before sort (`:369`);
-   - `BackHandler` + focus/IME handling + `InlineSearchField` row between `Column {` (`:383`) and
-     the Play/Shuffle row;
-   - `visibleEntries` / `displayedEntries`; swap the `items(...)` source (`:775`) — the key
-     expression is unchanged;
-   - drop handler reports `displayedEntries.map { it.value.id }` instead of from/to indices, and
-     `lastMovedFrom` / `lastMovedTo` are replaced by a single `hasPendingReorder` flag;
-   - the unfiltered drag path uses the same state, so drag handling stops mutating
-     `localReorderableEntries` and both modes share one code path;
-   - **no change** to the play/shuffle/row-tap call sites (`:432`, `:474`, `:809`) — they keep
-     receiving `localReorderableSongs`;
-   - subtitle count uses filtered/total (`:343-353`);
-   - filtered-empty branch inside the existing `localReorderableSongs.isEmpty()` area (`:726`),
-     checked **after** it so a genuinely empty playlist keeps its Add-songs copy.
-5. **Strings** — new keys in `res/values/strings_presentation_batch_b.xml` (where the rest of
-   this screen's copy lives), plus the same keys in all 13 translated `values-*/` folders: the
-   repo currently holds ~2066 strings per locale, so parity is expected. Keys:
-   `playlist_search_open`, `playlist_search_hint`, `playlist_search_clear`,
-   `playlist_search_empty_title`, `playlist_search_empty_body`,
-   `playlist_search_match_count` (`%1$d of %2$d songs`, as a `<plurals>` on the total count).
-6. **Tests** (below).
-7. **Docs** — no README change; the CHANGELOG is release-generated, so leave it alone.
+   - `isSearchSheetVisible` + sheet call site next to the other sheets (`:1000+`);
+   - `pendingScrollIndex` / `highlightedIndex` resolution block (§5);
+   - highlight background around `QueuePlaylistSongItem` (`:790-870`).
+   - Play / Shuffle / row tap / sort / reorder / remove call sites are **not** touched.
+5. **Strings** — new keys in `res/values/strings_presentation_batch_b.xml` (this screen's copy) and
+   the same keys in all 13 translated `values-*/` folders, which currently sit at parity (~2066
+   strings each): `playlist_search_title`, `playlist_search_hint`, `playlist_search_clear`,
+   `playlist_search_empty_title`, `playlist_search_empty_body`. A match-count string is not needed
+   — the row list speaks for itself.
+6. **Tests** (§10).
+7. **Docs** — no README change; CHANGELOG is release-generated.
 
 ---
 
 ## 9. Accessibility
 
-- Search icon: `contentDescription = playlist_search_open`; 48dp touch target via the existing
-  `IconButton` sizing.
-- Field: `label` text (not placeholder-only) so TalkBack announces it after the value; IME
-  action `Search` on the keyboard.
+- Search icon: `contentDescription = playlist_search_open` (reuse the existing
+  `cd_search_icon`-style wording), 48dp target via `IconButton`.
+- Field: real `label`, IME action Search.
 - Clear button: `contentDescription = playlist_search_clear`.
-- Result count in the subtitle gets
-  `semantics { liveRegion = LiveRegionMode.Polite }` so TalkBack reads "3 of 214 songs" as the
-  query changes instead of the user having to swipe back to the header.
-- The filtered-empty state is text, not just an icon, and the clear action is a real button.
-- Focus is explicitly requested on open and cleared on close (no orphaned focus indicator).
+- Result rows announce title, artist and album through `EnhancedSongListItem`'s existing semantics.
+- On empty result, the message includes the query so TalkBack reads back what was typed.
+- After the jump, move focus to the landed row and set
+  `semantics { liveRegion = LiveRegionMode.Polite }` on nothing less than the row itself, so
+  TalkBack says which song the viewport moved to. The flash is redundant under TalkBack; the
+  announcement is not.
+- Flash tint keeps ≥ 4.5:1 contrast with the row text (use `tertiaryContainer` at reduced alpha,
+  not a saturated fill).
 
 ---
 
 ## 10. Tests
 
-Unit — new `app/src/test/java/.../utils/PlaylistSongSearchTest.kt`, JUnit Jupiter
-(`org.junit.jupiter.api.Test`, per CONTRIBUTING). The matcher is the only new logic, so this is
-where the coverage is; the screen change is wiring and gets the Compose test below:
+Unit — `app/src/test/java/.../utils/PlaylistSongSearchTest.kt`, JUnit Jupiter
+(`org.junit.jupiter.api.Test`, per CONTRIBUTING):
 
-- blank and whitespace-only queries return the input list unchanged (same instance or equal)
-- case-insensitive title match; accented query matches unaccented song and vice versa
-- multi-token AND: `"miles kind"` matches "Kind of Blue" / "Miles Davis"; `"miles zappa"` does not
-- artist, album, album artist and genre match each on their own
+- blank / whitespace-only query returns the input entries unchanged
+- case-insensitive title match; accented query ↔ unaccented song
+- multi-token AND: `"miles kind"` matches, `"miles zappa"` does not
+- artist, album, album artist, genre match independently
 - multi-artist songs match on any `artists[].name` and on `displayArtist`
 - a query that only appears in the file path does **not** match
-- duplicate songs keep every occurrence and original order
-- no match returns an empty list; a fresh `Song` list is not mutated
+- filtered entries keep their original `index`, i.e. the jump target survives filtering
+- duplicate ids produce separate entries with distinct indices
+- no match returns an empty list; the input list is not mutated
 
-Unit — reorder under a filter. Existing coverage in
-`data/playlist/PlaylistOrderMergeTest.kt` and `PlaylistPreferencesRepositoryTest.kt:58` already
-asserts that a subset order leaves hidden ids in place, which is the whole mechanism (§7.1). Add:
+Compose — `app/src/androidTest/.../presentation/components/PlaylistSongSearchSheetTest.kt`,
+`createComposeRule()` + Truth, following `CreatePlaylistDialogTest.kt`:
 
-- the plan's example: stored `[A,B,C,D,E]`, visible `[D,B]` → `[A,D,C,B,E]`
-- a duplicate id that is only partly visible is refused (exists at
-  `PlaylistPreferencesRepositoryTest.kt:66`; keep it as the regression guard)
-- the ViewModel's rebuild step, if extracted as a pure `rebuildResolvedSongs(fullOrder, currentSongs)`
-  helper — same id twice with one occurrence unresolved → occurrence order preserved
+- typing narrows the list; clearing restores it
+- tapping a row reports the tapped entry's index and song id
+- empty state shows the query
 
-Compose — `app/src/androidTest/.../presentation/screens/PlaylistSearchFieldTest.kt`, using the
-`createComposeRule()` + Truth pattern from `CreatePlaylistDialogTest.kt`:
-
-- typing filters a stub list; clearing restores all rows
-- empty-result state shows the query and the clear button returns the full list
-- reorder mode and search field are usable at the same time (no mode is force-off)
-
-Manual QA matrix (worth listing in the PR): local playlist, folder playlist, smart playlist,
-Navidrome playlist, Jellyfin playlist, playlist with duplicate songs, 1000+ song playlist,
-RTL (Arabic), landscape, large font scale, with keyboard open.
+Manual QA matrix: 2000-song playlist, duplicate songs, folder/smart/Navidrome/Jellyfin playlist,
+RTL (Arabic), landscape, large font scale, keyboard open, jump while reorder mode is on.
 
 ---
 
 ## 11. Performance
 
-- Filtering is O(n·tokens·fields) over an in-memory list: ~214 songs is nothing; a 5000-song
-  playlist is still sub-millisecond to a few ms on a low-end device and runs inside `remember`,
-  not on every frame.
-- No debounce is needed (the 300 ms debounce in `SearchStateHolder` exists for SQLite FTS).
-  Typing recomposes the list container; rows come from `QueuePlaylistSongItem`, which is already
-  keyed and skippable.
-- Do **not** add the filtered list to `PlaylistUiState`, and do **not** call `toImmutableList()`
-  inside the composable body on every keystroke.
-- If profiling later shows keystroke jank on huge playlists, move the filter into a
-  `snapshotFlow(query).debounce(120).mapLatest { ... }` feeding a `StateFlow` in a small
-  screen-scoped holder — the matcher itself does not change.
+- Filtering is O(n·tokens·fields) over an in-memory list inside `remember(query, entries)`; a
+  2000-song playlist is sub-millisecond to a few ms. No debounce needed.
+- `.toImmutableList()` is not introduced on a per-keystroke path (CONTRIBUTING: it is O(n)).
+- `scrollToItem` composes only the visible window; the flash animates one row's background.
+- The playlist `LazyColumn` keeps its existing keys, so the jump does not rebuild rows.
 
 ---
 
-## 12. Risks and edge cases
+## 12. Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| Reordering while filtered writes the wrong permutation | It cannot: the drop reports an id order and `mergeVisiblePlaylistOrder` fills only the slots those ids already hold, refusing anything that is not a permutation of the visible multiset. Worth an explicit test with a hidden song and with a duplicate |
-| The reorder contract change breaks another caller | `reorderSongsInPlaylist` has exactly one caller (`PlaylistDetailScreen.kt:286`) and no test references the index API |
-| LazyColumn keys collide after filtering | Keys stay the row's full-playlist index, which is unique and travels with the row through filtering and dragging |
-| Sorted-mode reorder behaves oddly | Pre-existing: a drop materializes the current visible order into the stored slots and flips the playlist to manual order. Filtering simply narrows which slots are touched — no new behaviour, but call it out in the PR |
-| Keyboard covers the mini player / last rows under edge-to-edge (`MainActivity.kt:225`) | Field is top-anchored; add `Modifier.imePadding()` to the list's bottom `contentPadding` when the field is focused |
-| A user expects Play to respect the filter | Play/Shuffle are above the field and never change state while filtering; the filtered-empty state still offers Play, which reads as "these buttons are the playlist's, not the search's" |
-| Smart playlists refresh and drop a matched song | `refreshSmartPlaylistIfNeeded` (`PlaylistViewModel.kt:338`) re-derives the list; the query re-filters, so the view self-corrects |
-| Translated strings drifting from parity | Add all keys to all 14 `values*/` files in the same commit; flag non-English wording for native review in the PR |
+| Tapped index is stale (smart refresh / removal while sheet open) | Resolver validates index→id, then falls back to id lookup, then no-op (§5) |
+| Flash is missed on a slow device | 1.5s hold is generous; TalkBack gets a live-region announcement regardless |
+| `scrollToItem` feels abrupt after ~1000 rows | One constant to switch to `animateScrollToItem`; the flash was chosen over motion on purpose |
+| A third copy of the pill search field | Extract `InlineSearchField` here and let the two existing sheets adopt it later, rather than adding copy #4 |
+| Translating 5 new keys | Add all 14 locales in the same commit so parity holds; flag non-English wording for native review |
 
 ---
 
 ## 13. Delivery
 
 - Branch: `feature/playlist-search`
-- Commits, one logical step each:
+- Commits:
   1. `Add a pure playlist song matcher` (matcher + unit tests)
-  2. `Reorder playlist songs by visible order` (ViewModel contract change, index arithmetic removed,
-     subset merge tests) — lands first and is behaviour-preserving for the unfiltered screen
-  3. `Extract the pill search field into a shared composable`
-  4. `Filter songs in the playlist screen with a search field` (screen wiring + strings + compose test)
-- PR body: what changed, the interaction matrix above, and the output of
+  2. `Extract the pill search field into a shared composable`
+  3. `Find a song in a playlist and jump to it` (sheet + screen wiring + strings + Compose test)
+- PR body: what changed, the tap→scroll→flash flow, and the output of
   `./gradlew :app:compileDebugKotlin :app:lintDebug :app:testDebugUnitTest`. No `Co-Authored-By`
   trailer (CONTRIBUTING).
 
 ## 14. Decisions
 
-Resolved with the maintainer before implementation:
-
-1. **Query resets on navigation.** Leaving the playlist or switching to another one drops the
-   query; `rememberSaveable(playlistId)` gives that for free. No `SavedStateHandle` work.
-2. **Play/Shuffle always use the full playlist.** Search only filters the visible rows. Row taps
-   also play the full playlist from the tapped song. The existing playback call sites stay
-   untouched.
-3. **File-name matching dropped.** Metadata only (title/artist/album/album artist/genre); a
-   path match is noise for cloud songs and nobody indexes a playlist by file name.
-4. **Reorder stays available while filtering.** Disabling it was a workaround for an index-based
-   reorder API; the repository's subset merge already expresses the operation, so the plan now
-   moves the ViewModel to a visible-order contract instead (§7.1).
-
-Remaining design detail left to implementation: whether the field sits under the app bar
-(current proposal) or replaces the Add/Remove/Reorder chip row. Both are one-line layout
-choices; the chip row is hidden while searching either way.
+1. **Search is a locator.** It never filters the playlist, never changes playback, never touches
+   the queue snapshot. The only effect is the viewport.
+2. **Query resets** when the sheet closes and when the playlist changes.
+3. **Play/Shuffle and row taps stay as they are**; picking a search result scrolls, it does not
+   play.
+4. **Metadata-only matching**, no file path.
+5. **In-place filtering rejected** (§2) — and with it the ViewModel reorder-contract change that
+   the review had produced.
