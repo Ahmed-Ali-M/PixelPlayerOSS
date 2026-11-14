@@ -66,4 +66,12 @@
         <item quantity="one">%1$d song • %2$s</item>
         <item quantity="other">%1$d songs • %2$s</item>
     </plurals>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Find in playlist</string>
+    <string name="playlist_search_hint">Search titles, artists, albums, genres</string>
+    <string name="playlist_search_clear">Clear search</string>
+    <string name="playlist_search_empty_body">Try a different title, artist, album, or genre.</string>
+    <string name="playlist_search_open">Find a song in this playlist</string>
+    <string name="playlist_search_result_announcement">Showing “%1$s”</string>
 </resources>

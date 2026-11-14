@@ -59,4 +59,12 @@
         <item quantity="other">%1$d sanger • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">Sorter sanger</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Søk i spillelisten</string>
+    <string name="playlist_search_hint">Søk i titler, artister, album, sjangere</string>
+    <string name="playlist_search_clear">Tøm søket</string>
+    <string name="playlist_search_empty_body">Prøv en annen tittel, artist, album eller sjanger.</string>
+    <string name="playlist_search_open">Søk etter en sang i denne spillelisten</string>
+    <string name="playlist_search_result_announcement">Viser «%1$s»</string>
 </resources>

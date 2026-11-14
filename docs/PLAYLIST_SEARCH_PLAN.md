@@ -150,37 +150,38 @@ rows are exactly the design already used for picking songs. (The full-screen `Di
 
 1. Sheet calls `onSongSelected(entry)` with the row's carried index and song id.
 2. The sheet hides (`sheetState.hide()`), then the screen scrolls the playlist list.
-3. Because a scroll in a 2000-row list is disorienting on its own, the target row **flashes a
-   tint** for ~1.5s so the user sees which row is theirs.
+3. Because a scroll in a 2000-row list is disorienting on its own, the target row **gets a 2dp
+   tertiary ring** for ~1.5s so the user sees which row is theirs. A ring rather than a tint
+   because `QueuePlaylistSongItem` paints its own opaque surface; anything behind it is invisible.
 
 ```kotlin
 // PlaylistDetailScreen.kt
-var pendingScrollIndex by remember { mutableStateOf<Int?>(null) }
-var highlightedIndex by remember { mutableStateOf<Int?>(null) }
+var pendingJump by remember { mutableStateOf<IndexedValue<Song>?>(null) }
+var highlightedEntryIndex by remember { mutableStateOf<Int?>(null) }
 
-LaunchedEffect(pendingScrollIndex) {
-    val target = pendingScrollIndex ?: return@LaunchedEffect
+LaunchedEffect(pendingJump) {
+    val target = pendingJump ?: return@LaunchedEffect
+    pendingJump = null
     // Resolve against the current list: a smart playlist may have refreshed while the sheet was
-    // open, and a duplicate id must land on the occurrence that was tapped.
-    val index = localReorderableEntries.getOrNull(target)?.takeIf { it.index == target }?.index
-        ?: localReorderableEntries.indexOfFirst { it.value.id == selectedSongId }
-    if (index >= 0) {
-        listState.scrollToItem(index)          // instant; the flash explains where we landed
-        highlightedIndex = index
-        delay(1_500)
-        highlightedIndex = null
-    }
-    pendingScrollIndex = null
+    // open, and a duplicated song must land on the occurrence that was tapped.
+    val index = localReorderableEntries.getOrNull(target.index)
+        ?.takeIf { it.value.id == target.value.id }?.index
+        ?: localReorderableEntries.indexOfFirst { it.value.id == target.value.id }
+    if (index < 0) return@LaunchedEffect
+    listState.scrollToItem(index)       // instant; the ring explains where we landed
+    highlightedEntryIndex = index
+    delay(1_500)
+    highlightedEntryIndex = null
 }
 ```
 
 `scrollToItem` rather than `animateScrollToItem`: Compose animates a long jump as a visible
-fly-through, which is slower and no clearer than landing with a flash. One constant to tune if it
+fly-through, which is slower and no clearer than landing with a ring. One constant to tune if it
 feels abrupt.
 
-Row highlight is a wrapping `Modifier.background(animatedColor, shape)` around
-`QueuePlaylistSongItem` inside the existing `ReorderableItem` (`:790-870`), driven by
-`highlightedIndex == entry.index`. No signature change to the row composable.
+The ring is `.border(2.dp, animatedColor, RoundedCornerShape(22.dp))` on the existing
+`QueuePlaylistSongItem` modifier inside `ReorderableItem` (`:790-870`), driven by
+`highlightedEntryIndex == entry.index`. No signature change to the row composable.
 
 ---
 
@@ -227,14 +228,14 @@ var isSearchSheetVisible by rememberSaveable(playlistId) { mutableStateOf(false)
 4. **`PlaylistDetailScreen.kt`** (~35 changed lines):
    - search `IconButton` in `actions` before sort (`:369`);
    - `isSearchSheetVisible` + sheet call site next to the other sheets (`:1000+`);
-   - `pendingScrollIndex` / `highlightedIndex` resolution block (§5);
-   - highlight background around `QueuePlaylistSongItem` (`:790-870`).
+   - `pendingJump` / `highlightedEntryIndex` resolution block (§5);
+   - highlight ring around `QueuePlaylistSongItem` (`:790-870`).
    - Play / Shuffle / row tap / sort / reorder / remove call sites are **not** touched.
 5. **Strings** — new keys in `res/values/strings_presentation_batch_b.xml` (this screen's copy) and
-   the same keys in all 13 translated `values-*/` folders, which currently sit at parity (~2066
+   the same keys in all 12 translated `values-*/` folders, which currently sit at parity (~2066
    strings each): `playlist_search_title`, `playlist_search_hint`, `playlist_search_clear`,
-   `playlist_search_empty_title`, `playlist_search_empty_body`. A match-count string is not needed
-   — the row list speaks for itself.
+   `playlist_search_open`, `playlist_search_empty_body`, `playlist_search_result_announcement`.
+   A match-count string is not needed — the row list speaks for itself.
 6. **Tests** (§10).
 7. **Docs** — no README change; CHANGELOG is release-generated.
 
@@ -248,12 +249,13 @@ var isSearchSheetVisible by rememberSaveable(playlistId) { mutableStateOf(false)
 - Clear button: `contentDescription = playlist_search_clear`.
 - Result rows announce title, artist and album through `EnhancedSongListItem`'s existing semantics.
 - On empty result, the message includes the query so TalkBack reads back what was typed.
-- After the jump, move focus to the landed row and set
-  `semantics { liveRegion = LiveRegionMode.Polite }` on nothing less than the row itself, so
-  TalkBack says which song the viewport moved to. The flash is redundant under TalkBack; the
-  announcement is not.
-- Flash tint keeps ≥ 4.5:1 contrast with the row text (use `tertiaryContainer` at reduced alpha,
-  not a saturated fill).
+- After the jump the app-bar subtitle temporarily reads `Showing “<song>”` and carries
+  `semantics { liveRegion = LiveRegionMode.Polite }` while it does, so TalkBack says which song
+  the viewport moved to. The ring is redundant under TalkBack; the announcement is not.
+  (Compose has no first-class "announce" API here, and `View.announceForAccessibility` is
+  deprecated on API 36 — the live region is the idiom this codebase already uses.)
+- The ring uses `colorScheme.tertiary` (a stroke, never a text background), so it cannot reduce
+  row-text contrast.
 
 ---
 
@@ -289,7 +291,7 @@ RTL (Arabic), landscape, large font scale, keyboard open, jump while reorder mod
 - Filtering is O(n·tokens·fields) over an in-memory list inside `remember(query, entries)`; a
   2000-song playlist is sub-millisecond to a few ms. No debounce needed.
 - `.toImmutableList()` is not introduced on a per-keystroke path (CONTRIBUTING: it is O(n)).
-- `scrollToItem` composes only the visible window; the flash animates one row's background.
+- `scrollToItem` composes only the visible window; the ring animates one row's border color.
 - The playlist `LazyColumn` keeps its existing keys, so the jump does not rebuild rows.
 
 ---
@@ -300,7 +302,7 @@ RTL (Arabic), landscape, large font scale, keyboard open, jump while reorder mod
 | --- | --- |
 | Tapped index is stale (smart refresh / removal while sheet open) | Resolver validates index→id, then falls back to id lookup, then no-op (§5) |
 | Flash is missed on a slow device | 1.5s hold is generous; TalkBack gets a live-region announcement regardless |
-| `scrollToItem` feels abrupt after ~1000 rows | One constant to switch to `animateScrollToItem`; the flash was chosen over motion on purpose |
+| `scrollToItem` feels abrupt after ~1000 rows | One constant to switch to `animateScrollToItem`; the ring was chosen over motion on purpose |
 | A third copy of the pill search field | Extract `InlineSearchField` here and let the two existing sheets adopt it later, rather than adding copy #4 |
 | Translating 5 new keys | Add all 14 locales in the same commit so parity holds; flag non-English wording for native review |
 
@@ -313,7 +315,7 @@ RTL (Arabic), landscape, large font scale, keyboard open, jump while reorder mod
   1. `Add a pure playlist song matcher` (matcher + unit tests)
   2. `Extract the pill search field into a shared composable`
   3. `Find a song in a playlist and jump to it` (sheet + screen wiring + strings + Compose test)
-- PR body: what changed, the tap→scroll→flash flow, and the output of
+- PR body: what changed, the tap→scroll→ring flow, and the output of
   `./gradlew :app:compileDebugKotlin :app:lintDebug :app:testDebugUnitTest`. No `Co-Authored-By`
   trailer (CONTRIBUTING).
 

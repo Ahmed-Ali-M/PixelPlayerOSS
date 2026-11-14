@@ -63,4 +63,12 @@
         <item quantity="other">%1$d أغنية • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">فرز الأغاني</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">ابحث في قائمة التشغيل</string>
+    <string name="playlist_search_hint">ابحث في العناوين والفنانين والألبومات والأنواع</string>
+    <string name="playlist_search_clear">مسح البحث</string>
+    <string name="playlist_search_empty_body">جرّب عنوانًا أو فنانًا أو ألبومًا أو نوعًا آخر.</string>
+    <string name="playlist_search_open">ابحث عن أغنية في قائمة التشغيل هذه</string>
+    <string name="playlist_search_result_announcement">يتم عرض “%1$s”</string>
 </resources>

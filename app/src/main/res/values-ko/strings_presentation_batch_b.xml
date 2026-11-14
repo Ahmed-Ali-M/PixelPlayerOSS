@@ -58,4 +58,12 @@
         <item quantity="other">%1$d곡 • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">곡 정렬</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">플레이리스트에서 찾기</string>
+    <string name="playlist_search_hint">제목, 아티스트, 앨범, 장르 검색</string>
+    <string name="playlist_search_clear">검색 지우기</string>
+    <string name="playlist_search_empty_body">다른 제목, 아티스트, 앨범 또는 장르를 시도해 보세요.</string>
+    <string name="playlist_search_open">이 플레이리스트에서 곡 찾기</string>
+    <string name="playlist_search_result_announcement">“%1$s” 표시 중</string>
 </resources>

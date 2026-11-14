@@ -59,4 +59,12 @@
         <item quantity="other">%1$d lagu • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">Urutkan Lagu</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Cari di playlist</string>
+    <string name="playlist_search_hint">Cari judul, artis, album, genre</string>
+    <string name="playlist_search_clear">Hapus pencarian</string>
+    <string name="playlist_search_empty_body">Coba judul, artis, album, atau genre lain.</string>
+    <string name="playlist_search_open">Cari lagu di playlist ini</string>
+    <string name="playlist_search_result_announcement">Menampilkan “%1$s”</string>
 </resources>

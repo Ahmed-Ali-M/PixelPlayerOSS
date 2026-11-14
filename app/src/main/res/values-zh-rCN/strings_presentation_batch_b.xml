@@ -65,4 +65,12 @@
     <plurals name="presentation_batch_b_songs_dot_duration">
         <item quantity="other">%1$d 首歌曲 · %2$s</item>
     </plurals>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">在播放列表中查找</string>
+    <string name="playlist_search_hint">搜索标题、艺术家、专辑、流派</string>
+    <string name="playlist_search_clear">清除搜索</string>
+    <string name="playlist_search_empty_body">请尝试其他标题、艺术家、专辑或流派。</string>
+    <string name="playlist_search_open">在此播放列表中查找歌曲</string>
+    <string name="playlist_search_result_announcement">正在显示“%1$s”</string>
 </resources>

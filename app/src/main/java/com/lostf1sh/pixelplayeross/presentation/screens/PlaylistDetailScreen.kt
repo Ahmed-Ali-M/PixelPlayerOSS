@@ -10,8 +10,10 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -53,6 +55,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.DragIndicator
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -87,6 +90,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -106,8 +110,11 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -124,6 +131,7 @@ import com.lostf1sh.pixelplayeross.presentation.components.AutoScrollingText
 import com.lostf1sh.pixelplayeross.presentation.components.MiniPlayerHeight
 import com.lostf1sh.pixelplayeross.presentation.components.PlaylistBottomSheet
 import com.lostf1sh.pixelplayeross.presentation.components.PlaylistCover
+import com.lostf1sh.pixelplayeross.presentation.components.PlaylistSongSearchSheet
 import com.lostf1sh.pixelplayeross.presentation.components.QueuePlaylistSongItem
 import com.lostf1sh.pixelplayeross.presentation.components.SongPickerBottomSheet
 import com.lostf1sh.pixelplayeross.presentation.components.ExpressiveScrollBar
@@ -259,13 +267,15 @@ fun PlaylistDetailScreen(
     val localReorderableSongs = remember(localReorderableEntries) {
         localReorderableEntries.map { it.value }
     }
-
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val view = LocalView.current
     val appHapticsConfig = LocalAppHapticsConfig.current
     var lastMovedFrom by remember { mutableStateOf<Int?>(null) }
     var lastMovedTo by remember { mutableStateOf<Int?>(null) }
+    var isSearchSheetVisible by rememberSaveable(playlistId) { mutableStateOf(false) }
+    var pendingJump by remember { mutableStateOf<IndexedValue<Song>?>(null) }
+    var highlightedEntryIndex by remember { mutableStateOf<Int?>(null) }
 
     val reorderableState = rememberReorderableLazyListState(
         lazyListState = listState,
@@ -293,9 +303,33 @@ fun PlaylistDetailScreen(
         }
     }
 
+    // A search result names the row it was listed under. Resolve that against the live list: a
+    // smart playlist refresh or a sync can change the rows while the sheet is open, and a
+    // duplicated song must land on the occurrence that was tapped.
+    LaunchedEffect(pendingJump) {
+        val target = pendingJump ?: return@LaunchedEffect
+        pendingJump = null
+        val index = localReorderableEntries.getOrNull(target.index)
+            ?.takeIf { it.value.id == target.value.id }
+            ?.index
+            ?: localReorderableEntries.indexOfFirst { it.value.id == target.value.id }
+        if (index < 0) return@LaunchedEffect
+        listState.scrollToItem(index)
+        highlightedEntryIndex = index
+        kotlinx.coroutines.delay(1_500)
+        highlightedEntryIndex = null
+    }
+
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(rememberTopAppBarState())
     // The cover would leave no room for the songs on short (landscape phone) windows.
     val hasRoomForCover = LocalWindowInfo.current.containerDpSize.height >= 560.dp
+    // The row the search jump landed on, named in the subtitle while it is highlighted. The
+    // subtitle is a polite live region, so TalkBack hears which song the viewport moved to.
+    val highlightedSongTitle = remember(highlightedEntryIndex, localReorderableEntries) {
+        highlightedEntryIndex?.let { target ->
+            localReorderableEntries.firstOrNull { it.index == target }?.value?.title
+        }
+    }
     // The same first songs the library thumbnail uses, so the collage matches it.
     val coverSongs = remember(currentPlaylist?.songIds, songsInPlaylist) {
         currentPlaylist?.songIds.orEmpty().take(4)
@@ -341,15 +375,23 @@ fun PlaylistDetailScreen(
                     containerColor = Color.Transparent
                 ),
                 subtitle = { expanded ->
-                    Text(
-                        modifier = Modifier
-                            .padding(start = 8.dp)
-                            .then(if (expanded) Modifier.paddingFromBaseline(bottom = 28.dp) else Modifier),
-                        text = stringResource(
+                    val subtitleText = highlightedSongTitle
+                        ?.let { stringResource(R.string.playlist_search_result_announcement, it) }
+                        ?: stringResource(
                             R.string.presentation_batch_f_status_bullet_step,
                             formatSongCount(songsInPlaylist.size),
                             formatTotalDuration(songsInPlaylist)
-                        ),
+                        )
+                    Text(
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .semantics {
+                                if (highlightedSongTitle != null) {
+                                    liveRegion = LiveRegionMode.Polite
+                                }
+                            }
+                            .then(if (expanded) Modifier.paddingFromBaseline(bottom = 28.dp) else Modifier),
+                        text = subtitleText,
                         style = MaterialTheme.typography.labelMedium.copy(fontFamily = RoundedSans),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -367,6 +409,15 @@ fun PlaylistDetailScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { isSearchSheetVisible = true },
+                        enabled = localReorderableSongs.isNotEmpty()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = stringResource(R.string.playlist_search_open)
+                        )
+                    }
                     IconButton(
                         onClick = {
                             playerViewModel.showSortingSheet() 
@@ -796,11 +847,23 @@ fun PlaylistDetailScreen(
                                         if (isDragging) 1.05f else 1f,
                                         label = "scale"
                                     )
+                                    // The jump lands the viewport on a row; the ring tells the user
+                                    // which row it is without animating a fly-through scroll.
+                                    val jumpHighlightColor by animateColorAsState(
+                                        targetValue = if (highlightedEntryIndex == entry.index) {
+                                            MaterialTheme.colorScheme.tertiary
+                                        } else {
+                                            Color.Transparent
+                                        },
+                                        animationSpec = tween(durationMillis = 220),
+                                        label = "playlistJumpHighlight"
+                                    )
 
                                     QueuePlaylistSongItem(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(horizontal = 0.dp)
+                                            .border(2.dp, jumpHighlightColor, RoundedCornerShape(22.dp))
                                             .graphicsLayer {
                                                 scaleX = scale
                                                 scaleY = scale
@@ -997,6 +1060,22 @@ fun PlaylistDetailScreen(
         }
     }
     
+    if (isSearchSheetVisible) {
+        // Built here, not next to the state block: this is an O(n) copy and dragging mutates
+        // localReorderableEntries on every move.
+        val searchSheetEntries = remember(localReorderableEntries) {
+            localReorderableEntries.toImmutableList()
+        }
+        PlaylistSongSearchSheet(
+            entries = searchSheetEntries,
+            onDismiss = { isSearchSheetVisible = false },
+            onSongSelected = { entry ->
+                isSearchSheetVisible = false
+                pendingJump = entry
+            }
+        )
+    }
+
     if (showEditPlaylistDialog && currentPlaylist != null) {
         val initialShapeType = try {
             currentPlaylist.coverShapeType?.let { PlaylistShapeType.valueOf(it) } ?: PlaylistShapeType.Circle

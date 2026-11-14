@@ -65,4 +65,12 @@
     <plurals name="presentation_batch_b_songs_dot_duration">
         <item quantity="other">%1$d bài hát • %2$s</item>
     </plurals>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Tìm trong danh sách phát</string>
+    <string name="playlist_search_hint">Tìm tiêu đề, nghệ sĩ, album, thể loại</string>
+    <string name="playlist_search_clear">Xóa tìm kiếm</string>
+    <string name="playlist_search_empty_body">Hãy thử tiêu đề, nghệ sĩ, album hoặc thể loại khác.</string>
+    <string name="playlist_search_open">Tìm một bài hát trong danh sách phát này</string>
+    <string name="playlist_search_result_announcement">Đang hiển thị “%1$s”</string>
 </resources>

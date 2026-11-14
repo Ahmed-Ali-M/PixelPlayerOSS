@@ -59,4 +59,12 @@
         <item quantity="other">%1$d şarkı • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">Şarkıları Sırala</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Çalma listesinde ara</string>
+    <string name="playlist_search_hint">Başlık, sanatçı, albüm, tür ara</string>
+    <string name="playlist_search_clear">Aramayı temizle</string>
+    <string name="playlist_search_empty_body">Farklı bir başlık, sanatçı, albüm veya tür deneyin.</string>
+    <string name="playlist_search_open">Bu çalma listesinde şarkı ara</string>
+    <string name="playlist_search_result_announcement">“%1$s” gösteriliyor</string>
 </resources>

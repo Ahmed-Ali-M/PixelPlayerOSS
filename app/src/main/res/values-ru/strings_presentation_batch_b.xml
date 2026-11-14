@@ -61,4 +61,12 @@
         <item quantity="other">%1$d песни • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">Сортировать треки</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Поиск в плейлисте</string>
+    <string name="playlist_search_hint">Поиск по названиям, исполнителям, альбомам, жанрам</string>
+    <string name="playlist_search_clear">Очистить поиск</string>
+    <string name="playlist_search_empty_body">Попробуйте другое название, исполнителя, альбом или жанр.</string>
+    <string name="playlist_search_open">Найти песню в этом плейлисте</string>
+    <string name="playlist_search_result_announcement">Показано «%1$s»</string>
 </resources>

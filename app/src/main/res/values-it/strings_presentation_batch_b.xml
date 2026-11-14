@@ -59,4 +59,12 @@
         <item quantity="other">%1$d brani • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">Ordina brani</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Cerca nella playlist</string>
+    <string name="playlist_search_hint">Cerca titoli, artisti, album, generi</string>
+    <string name="playlist_search_clear">Cancella ricerca</string>
+    <string name="playlist_search_empty_body">Prova un altro titolo, artista, album o genere.</string>
+    <string name="playlist_search_open">Cerca un brano in questa playlist</string>
+    <string name="playlist_search_result_announcement">Visualizzazione di “%1$s”</string>
 </resources>

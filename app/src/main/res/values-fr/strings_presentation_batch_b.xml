@@ -59,4 +59,12 @@
         <item quantity="other">%1$d chansons • %2$s</item>
     </plurals>
     <string name="presentation_batch_b_sort_songs">Trier les chansons</string>
+
+    <!-- Find in playlist -->
+    <string name="playlist_search_title">Rechercher dans la playlist</string>
+    <string name="playlist_search_hint">Rechercher titres, artistes, albums, genres</string>
+    <string name="playlist_search_clear">Effacer la recherche</string>
+    <string name="playlist_search_empty_body">Essayez un autre titre, artiste, album ou genre.</string>
+    <string name="playlist_search_open">Rechercher un titre dans cette playlist</string>
+    <string name="playlist_search_result_announcement">Affichage de « %1$s »</string>
 </resources>
